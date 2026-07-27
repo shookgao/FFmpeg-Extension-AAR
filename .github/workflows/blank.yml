@@ -24,34 +24,25 @@ jobs:
         wmv1 wmv2 wmv3 vp6f vp6a rv10 rv20 rv30 rv40
 
     steps:
-      # 1. 检出本仓库
       - uses: actions/checkout@v4
 
-      # 2. Java 17
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # 3. 安装 Android SDK + NDK
       - name: Setup Android SDK & NDK
         uses: android-actions/setup-android@v3
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           cmdline-tools-version: latest
 
-      # 4. 克隆 Media3 源码
       - name: Clone androidx/media
         run: |
           REF="${{ github.event.inputs.media3_ref || '1.11.0-rc01' }}"
-          echo "Media3 ref: ${REF}"
           git clone --depth=1 -b "${REF}" \
-            https://github.com/androidx/media.git \
-            "${MEDIA3_DIR}"
-          echo "=== Media3 目录结构 ==="
-          ls -la "${MEDIA3_DIR}/libraries/decoder_ffmpeg/"
+            https://github.com/androidx/media.git "${MEDIA3_DIR}"
 
-      # 5. Gradle 缓存
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -59,25 +50,18 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles(format('{0}/gradle/wrapper/gradle-wrapper.properties', env.MEDIA3_DIR)) }}
           restore-keys: ${{ runner.os }}-gradle-
 
-      # 6. 设置 NDK 环境变量
       - name: Set NDK environment
         run: |
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
           echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
-          echo "NDK_PATH=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
 
-      # 7. 克隆 FFmpeg 源码
       - name: Clone FFmpeg source
         run: |
           JNI_DIR="${MEDIA3_DIR}/libraries/decoder_ffmpeg/src/main/jni"
           mkdir -p "${JNI_DIR}"
           git clone --depth=1 --branch=release/6.0 \
-            https://github.com/FFmpeg/FFmpeg.git \
-            "${JNI_DIR}/ffmpeg"
-          echo "FFmpeg source: ${JNI_DIR}/ffmpeg"
-          ls "${JNI_DIR}/"
+            https://github.com/FFmpeg/FFmpeg.git "${JNI_DIR}/ffmpeg"
 
-      # 8. 编译 FFmpeg 原生库
       - name: Build FFmpeg native libraries
         shell: bash
         run: |
@@ -91,34 +75,23 @@ jobs:
           chmod +x build_ffmpeg.sh
 
           echo "===== 开始编译 FFmpeg ====="
-          echo "  MODULE_PATH: ${FFMPEG_MODULE_PATH}"
-          echo "  NDK: ${NDK_PATH}"
-          echo "  HOST: ${HOST_PLATFORM}"
-          echo "  ABI: ${ANDROID_ABI}"
-          echo "  DECODERS: ${DECODERS}"
-
-          # 用临时文件绕过 tee 掩盖退出码的问题
           LOG="${MEDIA3_DIR}/ffmpeg_build.log"
           ./build_ffmpeg.sh \
-            "${FFMPEG_MODULE_PATH}" \
-            "${NDK_PATH}" \
-            "${HOST_PLATFORM}" \
-            "${ANDROID_ABI}" \
+            "${FFMPEG_MODULE_PATH}" "${NDK_PATH}" \
+            "${HOST_PLATFORM}" "${ANDROID_ABI}" \
             ${DECODERS} > "${LOG}" 2>&1
-          EXIT_CODE=$?
+          EC=$?
 
-          # 无论成功失败都打印日志末尾
-          echo "=== 构建日志（末尾 30 行）==="
+          echo "=== 日志末尾 30 行 ==="
           tail -30 "${LOG}"
+          echo "=== 退出码: $EC ==="
 
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "✅ FFmpeg 编译成功"
-            echo "=== 生成的库文件 ==="
-            find "${FFMPEG_MODULE_PATH}/jni/ffmpeg/android-libs" -name "*.a" 2>/dev/null | sort
-          else
-            echo "❌ FFmpeg 编译失败 (exit=$EXIT_CODE)"
+          if [ $EC -ne 0 ]; then
+            echo "❌ FFmpeg 编译失败"
             exit 1
           fi
+          echo "✅ FFmpeg 编译成功"
+          find "${FFMPEG_MODULE_PATH}/jni/ffmpeg/android-libs" -name "*.a" 2>/dev/null | sort
 
       - name: Upload FFmpeg build log (on failure)
         if: failure()
@@ -127,7 +100,6 @@ jobs:
           name: ffmpeg-build-log
           path: ${{ env.MEDIA3_DIR }}/ffmpeg_build.log
 
-      # 9. 打包 AAR
       - name: Build AAR
         shell: bash
         run: |
@@ -136,26 +108,29 @@ jobs:
           chmod +x gradlew
 
           echo "===== 打包 AAR ====="
-          echo "  GRADLE: :lib-decoder-ffmpeg:bundleReleaseAar"
-          echo "  DIR: $(pwd)"
-          echo "  JAVA_HOME: ${JAVA_HOME}"
+          echo "  TASK: :lib-decoder-ffmpeg:bundleReleaseAar"
+          echo "  PWD: $(pwd)"
 
-          # 确保 android SDK 环境
           export ANDROID_HOME="${ANDROID_SDK_ROOT}"
 
           LOG="${MEDIA3_DIR}/aar_build.log"
           ./gradlew :lib-decoder-ffmpeg:bundleReleaseAar > "${LOG}" 2>&1
-          EXIT_CODE=$?
+          EC=$?
 
-          echo "=== 构建日志（末尾 30 行）==="
+          echo "=== 日志末尾 30 行 ==="
           tail -30 "${LOG}"
+          echo "=== 退出码: $EC ==="
 
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "✅ AAR 打包成功"
-          else
-            echo "❌ AAR 打包失败 (exit=$EXIT_CODE)"
+          if [ $EC -ne 0 ]; then
+            echo "❌ AAR 打包失败"
             exit 1
           fi
+          echo "✅ AAR 打包成功"
+
+          # 记录 AAR 路径到文件，供后续步骤使用
+          find "${MEDIA3_DIR}" -name "*.aar" -path "*/decoder_ffmpeg/*" > "${MEDIA3_DIR}/aar_path.txt"
+          echo "=== 找到的 AAR 文件 ==="
+          cat "${MEDIA3_DIR}/aar_path.txt" || echo "无"
 
       - name: Upload AAR build log (on failure)
         if: failure()
@@ -164,42 +139,47 @@ jobs:
           name: aar-build-log
           path: ${{ env.MEDIA3_DIR }}/aar_build.log
 
-      # 10. 验证 AAR
-      - name: Verify AAR
+      - name: Extract and verify AAR
+        shell: bash
         run: |
-          echo "=== 搜索 AAR 文件 ==="
-          find "${MEDIA3_DIR}/libraries/decoder_ffmpeg/build" -name "*.aar" 2>/dev/null || echo "未找到 AAR"
+          set -e
+          echo "=== 搜索 AAR ==="
+          find "${MEDIA3_DIR}" -name "*.aar" -path "*/decoder_ffmpeg/*" 2>/dev/null | sort
 
-          echo ""
-          echo "=== build 目录结构 ==="
-          ls -laR "${MEDIA3_DIR}/libraries/decoder_ffmpeg/build/" 2>/dev/null | head -30 || echo "build 目录不存在"
-
-          AAR="${MEDIA3_DIR}/libraries/decoder_ffmpeg/build/outputs/aar/lib-decoder-ffmpeg-release.aar"
-          if [ -f "${AAR}" ]; then
-            echo ""
-            echo "✅ AAR:"
-            ls -lh "${AAR}"
-            echo ""
-            echo "原生库:"
-            unzip -l "${AAR}" | grep '\.so$'
-          else
-            echo ""
-            echo "❌ AAR 不存在于预期路径"
-            # 尝试其他可能路径
-            find /tmp -name "lib-decoder-ffmpeg*.aar" 2>/dev/null | head -5 || true
+          AAR_PATH=$(find "${MEDIA3_DIR}" -name "lib-decoder-ffmpeg-release.aar" 2>/dev/null | head -1)
+          if [ -z "${AAR_PATH}" ]; then
+            echo "❌ 找不到 AAR"
+            echo "=== 尝试全盘搜索 ==="
+            find /tmp -name "*.aar" -maxdepth 6 2>/dev/null || true
+            echo "=== decoder_ffmpeg 目录 ==="
+            find "${MEDIA3_DIR}/libraries/decoder_ffmpeg" -maxdepth 4 -type d 2>/dev/null | head -20 || true
             exit 1
           fi
 
-      # 11. 上传 AAR
+          echo "✅ 找到 AAR: ${AAR_PATH}"
+          echo "=== 文件信息 ==="
+          ls -lh "${AAR_PATH}"
+          echo "=== 原生库列表 ==="
+          unzip -l "${AAR_PATH}" | grep '\.so$'
+
+          # 保存路径供后续步骤使用
+          echo "${AAR_PATH}" > /tmp/aar_path.txt
+
       - name: Upload AAR artifact
-        uses: actions/upload-artifact@v4
+        shell: bash
+        run: |
+          AAR_PATH=$(cat /tmp/aar_path.txt)
+          echo "上传: ${AAR_PATH}"
+          # actions/upload-artifact 不直接支持变量 path
+          cp "${AAR_PATH}" "${MEDIA3_DIR}/lib-decoder-ffmpeg-release.aar"
+
+      - uses: actions/upload-artifact@v4
         with:
           name: lib-decoder-ffmpeg-release
-          path: ${{ env.MEDIA3_DIR }}/libraries/decoder_ffmpeg/build/outputs/aar/lib-decoder-ffmpeg-release.aar
+          path: ${{ env.MEDIA3_DIR }}/lib-decoder-ffmpeg-release.aar
           if-no-files-found: error
           compression-level: 0
 
-      # 12. 摘要
       - name: Summary
         run: |
           cat <<'EOS'
@@ -208,16 +188,12 @@ jobs:
           ║        FFmpeg AAR 构建完成                          ║
           ╚══════════════════════════════════════════════════════╝
 
-          新增支持的老格式:
+          新增解码器:
             AVI      (.avi)   → mpeg4 / msmpeg4 / mjpeg
             WMV/ASF  (.wmv)   → wmv1 / wmv2 / wmv3
             FLV      (.flv)   → h263 / mpeg4 / vp6
             MPEG-PS  (.mpg)   → mpeg1video / mpeg2video
-            RealMedia (.rm)    → rv10 / rv20 / rv30 / rv40
+            RealMedia (.rm)   → rv10 / rv20 / rv30 / rv40
 
-          使用方法:
-            1. Artifacts 下载 lib-decoder-ffmpeg-release
-            2. 解压得到 .aar，替换 app/libs/ 目录旧文件
-            3. 重新编译 APK
-
+          使用: Artifacts → lib-decoder-ffmpeg-release → 解压 → 替换 app/libs/
           EOS
