@@ -63,20 +63,9 @@ jobs:
       - name: Configure FFmpeg decoders
         run: |
           FFMPEG_DIR="${MEDIA3_DIR}/libraries/decoder_ffmpeg"
-          cat > "${FFMPEG_DIR}/build_ffmpeg.sh" << 'SCRIPT'
-          #!/bin/bash
-          # Auto-configured by GitHub Actions
-          ENABLED_DECODERS=(vorbis opus flac alac pcm_mulaw pcm_alaw mp3 amrnb amrwb aac ac3 eac3 dca mlp truehd mpeg4 msmpeg4v2 msmpeg4 mjpeg mpeg2video mpeg1video h263 wmv1 wmv2 wmv3 vp6f vp6a rv10 rv20 rv30 rv40)
-          SCRIPT
-          # 追加原始脚本内容（去掉首行）
-          tail -n +2 "${FFMPEG_DIR}/build_ffmpeg.sh.orig" 2>/dev/null || true
-          mv "${FFMPEG_DIR}/build_ffmpeg.sh.orig" "${FFMPEG_DIR}/build_ffmpeg.sh.org" 2>/dev/null || true
-
-          # 直接用 sed 替换更可靠
-          git -C "${MEDIA3_DIR}" checkout -- libraries/decoder_ffmpeg/build_ffmpeg.sh
           DECODERS="vorbis opus flac alac pcm_mulaw pcm_alaw mp3 amrnb amrwb aac ac3 eac3 dca mlp truehd mpeg4 msmpeg4v2 msmpeg4 mjpeg mpeg2video mpeg1video h263 wmv1 wmv2 wmv3 vp6f vp6a rv10 rv20 rv30 rv40"
           sed -i "s/^ENABLED_DECODERS=(.*)/ENABLED_DECODERS=(${DECODERS})/" "${FFMPEG_DIR}/build_ffmpeg.sh"
-          echo "=== build_ffmpeg.sh ENABLED_DECODERS ==="
+          echo "=== ENABLED_DECODERS ==="
           grep "^ENABLED_DECODERS=" "${FFMPEG_DIR}/build_ffmpeg.sh"
 
       # 8. 编译 FFmpeg 原生库
