@@ -1,0 +1,223 @@
+name: Build FFmpeg Extension AAR
+
+on:
+  # 手动触发（推荐方式）
+  workflow_dispatch:
+    inputs:
+      media3_ref:
+        description: 'Media3 仓库分支/标签 (默认匹配 app/build.gradle 中的版本)'
+        required: false
+        default: '1.11.0-rc01'
+        type: string
+
+  # 推送 ffmpeg 相关配置时自动触发
+  push:
+    paths:
+      - 'app/libs/README.md'
+      - '.github/workflows/build-ffmpeg-aar.yml'
+    branches: [master]
+
+jobs:
+  build-ffmpeg:
+    name: Build FFmpeg AAR with legacy video decoders
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # =========================================================
+      # 1. 检出本仓库（用于后续复制 AAR）
+      # =========================================================
+      - uses: actions/checkout@v4
+
+      # =========================================================
+      # 2. 设置 Java 17（Android Gradle 需要）
+      # =========================================================
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      # =========================================================
+      # 3. 设置 Android SDK（含 NDK）
+      # =========================================================
+      - name: Setup Android SDK & NDK
+        uses: android-actions/setup-android@v3
+        with:
+          # 与项目 app/build.gradle 中 ndkVersion 保持一致
+          ndk-version: '29.0.14206865'
+          cmdline-tools-version: latest
+
+      # =========================================================
+      # 4. 克隆 Media3 源码（用于编译 FFmpeg 扩展）
+      # =========================================================
+      - name: Clone androidx/media repository
+        run: |
+          MEDIA3_REF="${{ github.event.inputs.media3_ref || '1.11.0-rc01' }}"
+          echo "Using Media3 ref: ${MEDIA3_REF}"
+          git clone --depth=1 -b "${MEDIA3_REF}" \
+            https://github.com/androidx/media.git \
+            "${{ runner.temp }}/media"
+          echo "Media3 cloned at: ${{ runner.temp }}/media"
+
+      # =========================================================
+      # 5. 修改 build_ffmpeg.sh 加入视频解码器
+      # =========================================================
+      - name: Configure FFmpeg decoders
+        run: |
+          FFMPEG_DIR="${{ runner.temp }}/media/libraries/decoder_ffmpeg"
+
+          # 解码器完整列表（音频保留 + 新增老格式视频）
+          ENABLED_DECODERS=(
+            # Audio (existing)
+            vorbis opus flac alac pcm_mulaw pcm_alaw mp3 amrnb amrwb aac ac3 eac3 dca mlp truehd
+            # Video (old formats support)
+            mpeg4 msmpeg4v2 msmpeg4 mjpeg mpeg2video mpeg1video h263
+            wmv1 wmv2 wmv3 vp6f vp6a rv10 rv20 rv30 rv40
+          )
+
+          DECODER_LIST="${ENABLED_DECODERS[*]}"
+          echo "ENABLED_DECODERS=(${DECODER_LIST})"
+
+          # 修改 build_ffmpeg.sh 中的 ENABLED_DECODERS
+          sed -i "s/^ENABLED_DECODERS=(.*)/ENABLED_DECODERS=(${DECODER_LIST})/" "${FFMPEG_DIR}/build_ffmpeg.sh"
+          echo ""
+          echo "=== build_ffmpeg.sh ENABLED_DECODERS ==="
+          grep "^ENABLED_DECODERS=" "${FFMPEG_DIR}/build_ffmpeg.sh"
+
+      # =========================================================
+      # 6. 编译 FFmpeg 原生库
+      # =========================================================
+      - name: Build FFmpeg native libraries
+        working-directory: ${{ runner.temp }}/media/libraries/decoder_ffmpeg
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/29.0.14206865"
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+
+          chmod +x build_ffmpeg.sh
+
+          echo ""
+          echo "===== 开始编译 FFmpeg 原生库（约 10-20 分钟）====="
+          if ./build_ffmpeg.sh 2>&1 | tee ffmpeg_build.log; then
+            echo ""
+            echo "===== FFmpeg 编译成功 ====="
+          else
+            echo ""
+            echo "===== FFmpeg 编译失败！最后 50 行日志：====="
+            tail -50 ffmpeg_build.log
+            exit 1
+          fi
+
+      - name: Upload FFmpeg build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-build-log
+          path: ${{ runner.temp }}/media/libraries/decoder_ffmpeg/ffmpeg_build.log
+
+      # =========================================================
+      # 7. 打包 AAR
+      # =========================================================
+      - name: Build FFmpeg extension AAR
+        working-directory: ${{ runner.temp }}/media
+        run: |
+          echo "===== 打包 AAR ====="
+          if ./gradlew :media:decoder_ffmpeg:bundleReleaseAar \
+               -p "${{ runner.temp }}/media" \
+               2>&1 | tee aar_build.log; then
+            echo ""
+            echo "===== AAR 打包成功 ====="
+          else
+            echo ""
+            echo "===== AAR 打包失败！最后 50 行日志：====="
+            tail -50 aar_build.log
+            exit 1
+          fi
+
+      - name: Upload AAR build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aar-build-log
+          path: ${{ runner.temp }}/media/aar_build.log
+
+      # =========================================================
+      # 8. 确认 AAR 文件
+      # =========================================================
+      - name: Verify AAR output
+        run: |
+          AAR_PATH="${{ runner.temp }}/media/libraries/decoder_ffmpeg/build/outputs/aar"
+          echo "=== AAR 输出目录 ==="
+          ls -la "${AAR_PATH}/" || echo "目录不存在"
+
+          if [ -f "${AAR_PATH}/lib-decoder-ffmpeg-release.aar" ]; then
+            echo ""
+            echo "===== AAR 文件信息 ====="
+            ls -lh "${AAR_PATH}/lib-decoder-ffmpeg-release.aar"
+            echo ""
+            echo "===== AAR 中的原生库列表 ====="
+            unzip -l "${AAR_PATH}/lib-decoder-ffmpeg-release.aar" | grep "\.so$" || echo "未找到 .so 文件"
+          else
+            echo "错误：未找到 AAR 文件！"
+            exit 1
+          fi
+
+      # =========================================================
+      # 9. 将新 AAR 复制到项目目录
+      # =========================================================
+      - name: Copy AAR to project libs
+        run: |
+          mkdir -p app/libs
+          cp "${{ runner.temp }}/media/libraries/decoder_ffmpeg/build/outputs/aar/lib-decoder-ffmpeg-release.aar" \
+             app/libs/lib-decoder-ffmpeg-release.aar
+          echo "AAR 已复制到 app/libs/"
+          ls -lh app/libs/lib-decoder-ffmpeg-release.aar
+
+      # =========================================================
+      # 10. 提交并推送 AAR（可选，默认不推送）
+      # =========================================================
+      # 默认不自动提交，让用户审核后手动下载
+      # 如需自动提交，取消下方注释并确保有写入权限
+
+      # - name: Commit and push AAR
+      #   run: |
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git add app/libs/lib-decoder-ffmpeg-release.aar
+      #     git commit -m "chore: update lib-decoder-ffmpeg-release.aar with legacy video decoders"
+      #     git push
+
+      # =========================================================
+      # 11. 上传 AAR 为 Artifact（方便手动下载）
+      # =========================================================
+      - name: Upload AAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-decoder-ffmpeg-release
+          path: ${{ runner.temp }}/media/libraries/decoder_ffmpeg/build/outputs/aar/lib-decoder-ffmpeg-release.aar
+          if-no-files-found: error
+          compression-level: 0  # AAR 已经是压缩的
+
+      # =========================================================
+      # 12. 更新 README 记录构建信息
+      # =========================================================
+      - name: Show build summary
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "  FFmpeg AAR 构建完成"
+          echo "=========================================="
+          echo ""
+          echo "支持的老格式视频解码器:"
+          echo "  • AVI      (.avi)   → mpeg4, msmpeg4v2, msmpeg4, mjpeg"
+          echo "  • WMV/ASF  (.wmv)   → wmv1, wmv2, wmv3"
+          echo "  • FLV      (.flv)   → h263, mpeg4, vp6f, vp6a"
+          echo "  • MPEG-PS  (.mpg)   → mpeg1video, mpeg2video"
+          echo "  • RealMedia (.rm)    → rv10, rv20, rv30, rv40"
+          echo ""
+          echo "Artifact 下载路径:"
+          echo "  Actions 页面 → 本次运行 → Artifacts →"
+          echo "  lib-decoder-ffmpeg-release"
+          echo ""
+          echo "下载后放入 app/libs/ 目录替换旧文件即可。"
