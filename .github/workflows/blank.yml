@@ -72,7 +72,7 @@ jobs:
           JNI_DIR="${MEDIA3_DIR}/libraries/decoder_ffmpeg/src/main/jni"
           mkdir -p "${JNI_DIR}"
           git clone --depth=1 --branch=release/6.0 \
-            git://source.ffmpeg.org/ffmpeg.git \
+            https://github.com/FFmpeg/FFmpeg.git \
             "${JNI_DIR}/ffmpeg"
           echo "FFmpeg source: ${JNI_DIR}/ffmpeg"
           ls "${JNI_DIR}/"
