@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      MEDIA3_DIR: ${{ runner.temp }}/androidx-media
+      MEDIA3_DIR: /tmp/androidx-media
       NDK_VERSION: 29.0.14206865
 
     steps:
