@@ -13,7 +13,7 @@ jobs:
   build-ffmpeg:
     name: Build FFmpeg AAR with legacy video decoders
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       MEDIA3_DIR: /tmp/androidx-media
       NDK_VERSION: 29.0.14206865
@@ -48,6 +48,8 @@ jobs:
           git clone --depth=1 -b "${REF}" \
             https://github.com/androidx/media.git \
             "${MEDIA3_DIR}"
+          echo "=== Media3 目录结构 ==="
+          ls -la "${MEDIA3_DIR}/libraries/decoder_ffmpeg/"
 
       # 5. Gradle 缓存
       - name: Cache Gradle
@@ -62,8 +64,9 @@ jobs:
         run: |
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
           echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
+          echo "NDK_PATH=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
 
-      # 7. 克隆 FFmpeg 源码到 jni 目录
+      # 7. 克隆 FFmpeg 源码
       - name: Clone FFmpeg source
         run: |
           JNI_DIR="${MEDIA3_DIR}/libraries/decoder_ffmpeg/src/main/jni"
@@ -71,12 +74,14 @@ jobs:
           git clone --depth=1 --branch=release/6.0 \
             git://source.ffmpeg.org/ffmpeg.git \
             "${JNI_DIR}/ffmpeg"
-          echo "FFmpeg cloned to: ${JNI_DIR}/ffmpeg"
-          ls -la "${JNI_DIR}/"
+          echo "FFmpeg source: ${JNI_DIR}/ffmpeg"
+          ls "${JNI_DIR}/"
 
-      # 8. 编译 FFmpeg 原生库（4 种架构）
+      # 8. 编译 FFmpeg 原生库
       - name: Build FFmpeg native libraries
+        shell: bash
         run: |
+          set -e
           FFMPEG_MODULE_PATH="${MEDIA3_DIR}/libraries/decoder_ffmpeg/src/main"
           NDK_PATH="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
           HOST_PLATFORM="linux-x86_64"
@@ -85,23 +90,33 @@ jobs:
           cd "${FFMPEG_MODULE_PATH}/jni"
           chmod +x build_ffmpeg.sh
 
-          echo "===== 编译 FFmpeg（约 20 分钟）====="
-          echo "NDK_PATH=${NDK_PATH}"
-          echo "HOST_PLATFORM=${HOST_PLATFORM}"
-          echo "ANDROID_ABI=${ANDROID_ABI}"
-          echo "DECODERS=${DECODERS}"
+          echo "===== 开始编译 FFmpeg ====="
+          echo "  MODULE_PATH: ${FFMPEG_MODULE_PATH}"
+          echo "  NDK: ${NDK_PATH}"
+          echo "  HOST: ${HOST_PLATFORM}"
+          echo "  ABI: ${ANDROID_ABI}"
+          echo "  DECODERS: ${DECODERS}"
 
-          if ./build_ffmpeg.sh \
-               "${FFMPEG_MODULE_PATH}" \
-               "${NDK_PATH}" \
-               "${HOST_PLATFORM}" \
-               "${ANDROID_ABI}" \
-               ${DECODERS} \
-               2>&1 | tee "${MEDIA3_DIR}/ffmpeg_build.log"; then
+          # 用临时文件绕过 tee 掩盖退出码的问题
+          LOG="${MEDIA3_DIR}/ffmpeg_build.log"
+          ./build_ffmpeg.sh \
+            "${FFMPEG_MODULE_PATH}" \
+            "${NDK_PATH}" \
+            "${HOST_PLATFORM}" \
+            "${ANDROID_ABI}" \
+            ${DECODERS} > "${LOG}" 2>&1
+          EXIT_CODE=$?
+
+          # 无论成功失败都打印日志末尾
+          echo "=== 构建日志（末尾 30 行）==="
+          tail -30 "${LOG}"
+
+          if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ FFmpeg 编译成功"
+            echo "=== 生成的库文件 ==="
+            find "${FFMPEG_MODULE_PATH}/jni/ffmpeg/android-libs" -name "*.a" 2>/dev/null | sort
           else
-            echo "❌ 编译失败"
-            tail -50 "${MEDIA3_DIR}/ffmpeg_build.log"
+            echo "❌ FFmpeg 编译失败 (exit=$EXIT_CODE)"
             exit 1
           fi
 
@@ -114,16 +129,31 @@ jobs:
 
       # 9. 打包 AAR
       - name: Build AAR
-        working-directory: ${{ env.MEDIA3_DIR }}
+        shell: bash
         run: |
+          set -e
+          cd "${MEDIA3_DIR}"
           chmod +x gradlew
+
           echo "===== 打包 AAR ====="
-          if ./gradlew :lib-decoder-ffmpeg:bundleReleaseAar \
-               2>&1 | tee "${MEDIA3_DIR}/aar_build.log"; then
+          echo "  GRADLE: :lib-decoder-ffmpeg:bundleReleaseAar"
+          echo "  DIR: $(pwd)"
+          echo "  JAVA_HOME: ${JAVA_HOME}"
+
+          # 确保 android SDK 环境
+          export ANDROID_HOME="${ANDROID_SDK_ROOT}"
+
+          LOG="${MEDIA3_DIR}/aar_build.log"
+          ./gradlew :lib-decoder-ffmpeg:bundleReleaseAar > "${LOG}" 2>&1
+          EXIT_CODE=$?
+
+          echo "=== 构建日志（末尾 30 行）==="
+          tail -30 "${LOG}"
+
+          if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ AAR 打包成功"
           else
-            echo "❌ 打包失败"
-            tail -50 "${MEDIA3_DIR}/aar_build.log"
+            echo "❌ AAR 打包失败 (exit=$EXIT_CODE)"
             exit 1
           fi
 
@@ -137,16 +167,26 @@ jobs:
       # 10. 验证 AAR
       - name: Verify AAR
         run: |
+          echo "=== 搜索 AAR 文件 ==="
+          find "${MEDIA3_DIR}/libraries/decoder_ffmpeg/build" -name "*.aar" 2>/dev/null || echo "未找到 AAR"
+
+          echo ""
+          echo "=== build 目录结构 ==="
+          ls -laR "${MEDIA3_DIR}/libraries/decoder_ffmpeg/build/" 2>/dev/null | head -30 || echo "build 目录不存在"
+
           AAR="${MEDIA3_DIR}/libraries/decoder_ffmpeg/build/outputs/aar/lib-decoder-ffmpeg-release.aar"
           if [ -f "${AAR}" ]; then
-            echo "✅ AAR 文件:"
+            echo ""
+            echo "✅ AAR:"
             ls -lh "${AAR}"
             echo ""
             echo "原生库:"
             unzip -l "${AAR}" | grep '\.so$'
           else
-            echo "❌ AAR 不存在"
-            ls -la "$(dirname "${AAR}")/" 2>/dev/null || true
+            echo ""
+            echo "❌ AAR 不存在于预期路径"
+            # 尝试其他可能路径
+            find /tmp -name "lib-decoder-ffmpeg*.aar" 2>/dev/null | head -5 || true
             exit 1
           fi
 
